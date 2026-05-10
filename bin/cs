@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+# claude-secrets CLI dispatcher.
+# Usage:
+#   cs add                  open browser UI to add a new secret
+#   cs list                  list stored secrets (names only)
+#   cs get <name>            print secret value to stdout
+#   cs set <name> <val>      set secret (or update)
+#   cs rm  <name>            delete secret
+#   cs load                  export all secrets as env vars (run with `source`)
+#   cs export <name>         print as `export KEY=value` for shell sourcing
+#   cs import <file.env>     import a .env-style file into this namespace
+#   cs ui                    same as `cs add` — opens browser
+#   cs help                  show this help
+
+set -u
+
+# Namespace prefix in Keychain (default: "cs", overridable via env).
+CS_NAMESPACE="${CS_NAMESPACE:-cs}"
+
+usage() {
+    sed -n '2,12p' "$0" | sed 's/^# //;s/^#//'
+}
+
+require_macos() {
+    if [ "$(uname)" != "Darwin" ]; then
+        echo "claude-secrets: only macOS is supported right now (uses Keychain via \`security\`)." >&2
+        exit 2
+    fi
+}
+
+cmd_set() {
+    local name="${1:-}" value="${2:-}"
+    if [ -z "$name" ] || [ -z "$value" ]; then
+        echo "usage: cs set <name> <value>" >&2; return 2
+    fi
+    security add-generic-password -U -a "$USER" -s "$CS_NAMESPACE-$name" -w "$value" >/dev/null 2>&1
+    echo "stored: $CS_NAMESPACE-$name"
+}
+
+cmd_get() {
+    local name="${1:-}"
+    if [ -z "$name" ]; then
+        echo "usage: cs get <name>" >&2; return 2
+    fi
+    security find-generic-password -a "$USER" -s "$CS_NAMESPACE-$name" -w 2>/dev/null
+}
+
+cmd_rm() {
+    local name="${1:-}"
+    if [ -z "$name" ]; then
+        echo "usage: cs rm <name>" >&2; return 2
+    fi
+    if security delete-generic-password -s "$CS_NAMESPACE-$name" >/dev/null 2>&1; then
+        echo "removed: $CS_NAMESPACE-$name"
+    else
+        echo "not found: $CS_NAMESPACE-$name" >&2
+        return 1
+    fi
+}
+
+cmd_list() {
+    # Dump login keychain and grep for our namespace prefix.
+    security dump-keychain 2>/dev/null \
+      | grep -E '"svce".*"'"$CS_NAMESPACE"'-' \
+      | sed -E 's/.*"('"$CS_NAMESPACE"'-[^"]+)".*/\1/' \
+      | sort -u
+}
+
+cmd_export() {
+    local name="${1:-}"
+    if [ -z "$name" ]; then
+        echo "usage: cs export <name>" >&2; return 2
+    fi
+    local val; val=$(cmd_get "$name")
+    if [ -z "$val" ]; then
+        echo "not found: $CS_NAMESPACE-$name" >&2; return 1
+    fi
+    # Convert kebab-case → SNAKE_CASE for env var name.
+    local var
+    var=$(echo "$name" | tr 'a-z-' 'A-Z_')
+    echo "export $var='$val'"
+}
+
+cmd_load() {
+    # Emit `export FOO=...` for every stored secret. Caller is expected to `eval` or `source`.
+    local item var val
+    while IFS= read -r item; do
+        [ -z "$item" ] && continue
+        local short="${item#$CS_NAMESPACE-}"
+        var=$(echo "$short" | tr 'a-z-' 'A-Z_')
+        val=$(security find-generic-password -a "$USER" -s "$item" -w 2>/dev/null)
+        if [ -n "$val" ]; then
+            # Escape single quotes inside the value.
+            local esc; esc=${val//\'/\'\\\'\'}
+            echo "export $var='$esc'"
+        fi
+    done < <(cmd_list)
+}
+
+cmd_ui() {
+    local script_dir; script_dir="$(cd "$(dirname "$0")/.." && pwd)"
+    exec python3 "$script_dir/ui/add-secret.py"
+}
+
+# Import KEY=value lines from a .env-style file into the current namespace.
+# Existing entries are overwritten (security CLI's -U flag). Quotes stripped.
+# Lines starting with # or empty are ignored.
+cmd_import() {
+    local file="${1:-}" dry="${CS_DRY_RUN:-}"
+    if [ -z "$file" ]; then
+        echo "usage: cs import <path-to-.env> [--dry-run]" >&2; return 2
+    fi
+    if [ "${2:-}" = "--dry-run" ]; then dry=1; fi
+    if [ ! -f "$file" ]; then
+        echo "no such file: $file" >&2; return 1
+    fi
+    local count=0
+    while IFS= read -r line || [ -n "$line" ]; do
+        # Skip comments and blanks.
+        case "$line" in ''|\#*) continue ;; esac
+        # Allow optional "export " prefix; strip it.
+        line="${line#export }"
+        # Split on first =
+        local key="${line%%=*}"
+        local val="${line#*=}"
+        [ "$key" = "$line" ] && continue   # no '=' found
+        # Strip surrounding whitespace from key.
+        key="${key#"${key%%[![:space:]]*}"}"; key="${key%"${key##*[![:space:]]}"}"
+        [ -z "$key" ] && continue
+        # Strip wrapping single or double quotes from value.
+        case "$val" in
+            \"*\") val="${val#\"}"; val="${val%\"}" ;;
+            \'*\') val="${val#\'}"; val="${val%\'}" ;;
+        esac
+        # Convert KEY_LIKE_THIS → key-like-this for Keychain entry name.
+        local name; name=$(echo "$key" | tr 'A-Z_' 'a-z-')
+        # Skip empty values — .env often has placeholders we shouldn't store.
+        if [ -z "$val" ]; then
+            echo "skipped (empty): $CS_NAMESPACE-$name"
+            continue
+        fi
+        if [ -n "$dry" ]; then
+            echo "[dry-run] would store $CS_NAMESPACE-$name (${#val} chars)"
+        else
+            cmd_set "$name" "$val" >/dev/null
+            echo "stored: $CS_NAMESPACE-$name"
+        fi
+        count=$((count+1))
+    done < "$file"
+    echo
+    echo "$count entr$( [ "$count" = "1" ] && echo y || echo ies ) processed"
+}
+
+# ---------- dispatch ----------
+require_macos
+sub="${1:-help}"
+shift || true
+case "$sub" in
+    set)    cmd_set    "$@" ;;
+    get)    cmd_get    "$@" ;;
+    rm)     cmd_rm     "$@" ;;
+    list|ls)cmd_list   "$@" ;;
+    export) cmd_export "$@" ;;
+    load)   cmd_load   "$@" ;;
+    add|ui) cmd_ui     "$@" ;;
+    import) cmd_import "$@" ;;
+    help|-h|--help) usage ;;
+    *)      echo "unknown command: $sub" >&2; usage; exit 2 ;;
+esac

@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+"""
+Minimal MCP (Model Context Protocol) server that exposes claude-secrets
+entries as tools an MCP-aware client (Claude Code, Cursor, etc.) can call
+WITHOUT the secret value ever entering the chat context.
+
+The model can call `cs_list` to discover available secret names, and
+`cs_inject` to use a secret inside a follow-up command. `cs_inject` writes
+the secret to a one-shot file under $TMPDIR with mode 0600, returns the
+file path to the model, and self-deletes after the first read. The model
+never sees the literal value.
+
+Wire up in Claude Code via `claude mcp add`:
+    claude mcp add cs-secrets python3 /path/to/cs-mcp-server.py
+
+This file speaks the MCP protocol manually over stdio — no third-party
+SDK needed. Pure Python stdlib.
+
+CAVEAT: writing the secret to a temp file means it lives on disk for a
+few seconds. Same exposure profile as `cs get` piping into another
+command. If you need stricter handling (memory-only inject), pair this
+with a proxying agent like Vaulted or secretless-ai.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+
+NAMESPACE = os.environ.get("CS_NAMESPACE", "cs")
+USER = os.environ.get("USER") or os.environ.get("USERNAME") or "user"
+
+# ---------- Keychain helpers (shared with the UI) ----------
+
+def kc_list() -> list[str]:
+    p = subprocess.run(["security", "dump-keychain"], capture_output=True, text=True)
+    items = set()
+    for line in p.stdout.splitlines():
+        m = re.search(r'"svce".*"(' + re.escape(NAMESPACE) + r'-[^"]+)"', line)
+        if m:
+            items.add(m.group(1))
+    return sorted(items)
+
+def kc_get(name: str) -> str | None:
+    full = name if name.startswith(f"{NAMESPACE}-") else f"{NAMESPACE}-{name}"
+    p = subprocess.run(
+        ["security", "find-generic-password", "-a", USER, "-s", full, "-w"],
+        capture_output=True, text=True,
+    )
+    if p.returncode != 0:
+        return None
+    return p.stdout.rstrip("\n")
+
+# ---------- MCP protocol ----------
+
+PROTOCOL_VERSION = "2024-11-05"
+SERVER_INFO = {"name": "claude-secrets", "version": "0.1.0"}
+
+TOOLS = [
+    {
+        "name": "cs_list",
+        "description": (
+            "List the names of secrets stored under the current namespace. "
+            "Returns short names (without the namespace prefix). The model can "
+            "decide which secret to inject; the value itself is never returned."
+        ),
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "cs_inject",
+        "description": (
+            "Materialize a stored secret into a short-lived 0600 temp file and "
+            "return that file's path. Useful for piping the value into a CLI "
+            "without putting it in chat context. The file is deleted after "
+            "first read or after 60 seconds — whichever comes first."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Short name of the secret (without `cs-` prefix)."},
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+    },
+]
+
+# ---------- Tool implementations ----------
+
+def _ttl_unlink(path: str, ttl: float = 60.0) -> None:
+    def _kill():
+        time.sleep(ttl)
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+    threading.Thread(target=_kill, daemon=True).start()
+
+def tool_cs_list(_args: dict) -> dict:
+    items = [s[len(NAMESPACE) + 1:] for s in kc_list()]
+    return {"content": [{"type": "text", "text": "\n".join(items) if items else "(no entries)"}]}
+
+def tool_cs_inject(args: dict) -> dict:
+    name = (args.get("name") or "").strip()
+    if not name:
+        return {"content": [{"type": "text", "text": "error: `name` required"}], "isError": True}
+    value = kc_get(name)
+    if value is None:
+        return {"content": [{"type": "text", "text": f"error: no secret named '{name}'"}], "isError": True}
+    fd, path = tempfile.mkstemp(prefix=f"cs-{name}-", suffix=".secret")
+    try:
+        os.fchmod(fd, 0o600)
+        os.write(fd, value.encode("utf-8"))
+    finally:
+        os.close(fd)
+    _ttl_unlink(path, ttl=60.0)
+    return {
+        "content": [{
+            "type": "text",
+            "text": (
+                f"Secret materialized to a one-shot 0600 file:\n  {path}\n\n"
+                f"Read it ONCE (it will self-delete in 60s). Example uses:\n"
+                f"  curl -H \"Authorization: Bearer $(cat '{path}')\" https://api.example.com/...\n"
+                f"  export FOO=$(cat '{path}'); ... ; rm -f '{path}'"
+            ),
+        }]
+    }
+
+TOOL_DISPATCH = {"cs_list": tool_cs_list, "cs_inject": tool_cs_inject}
+
+# ---------- JSON-RPC over stdio ----------
+
+def reply(req_id, result=None, error=None):
+    msg = {"jsonrpc": "2.0", "id": req_id}
+    if error is not None:
+        msg["error"] = error
+    else:
+        msg["result"] = result
+    sys.stdout.write(json.dumps(msg) + "\n")
+    sys.stdout.flush()
+
+def handle(req: dict):
+    method = req.get("method", "")
+    req_id = req.get("id")
+    params = req.get("params", {}) or {}
+
+    if method == "initialize":
+        reply(req_id, {
+            "protocolVersion": PROTOCOL_VERSION,
+            "capabilities": {"tools": {}},
+            "serverInfo": SERVER_INFO,
+        })
+    elif method == "tools/list":
+        reply(req_id, {"tools": TOOLS})
+    elif method == "tools/call":
+        name = params.get("name")
+        args = params.get("arguments") or {}
+        impl = TOOL_DISPATCH.get(name)
+        if not impl:
+            reply(req_id, error={"code": -32601, "message": f"unknown tool: {name}"})
+            return
+        try:
+            reply(req_id, impl(args))
+        except Exception as ex:
+            reply(req_id, error={"code": -32000, "message": str(ex)})
+    elif method == "ping":
+        reply(req_id, {})
+    elif method.startswith("notifications/"):
+        # Notifications don't get a reply.
+        pass
+    else:
+        if req_id is not None:
+            reply(req_id, error={"code": -32601, "message": f"method not found: {method}"})
+
+def main() -> None:
+    if sys.platform != "darwin":
+        sys.stderr.write("claude-secrets MCP: macOS only (uses Keychain).\n")
+        sys.exit(2)
+    for raw in sys.stdin:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            req = json.loads(raw)
+        except Exception as ex:
+            sys.stderr.write(f"bad JSON: {ex}\n")
+            continue
+        handle(req)
+
+if __name__ == "__main__":
+    main()

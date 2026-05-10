@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# claude-secrets — iCloud Drive sync via age encryption.
+#
+# Usage:
+#   cs-sync export   read all cs-* entries → encrypt with age → write into iCloud Drive
+#   cs-sync import   read encrypted file from iCloud Drive → decrypt → write into Keychain
+#   cs-sync status   show last-export timestamp and file path
+#
+# This is an OPTIONAL bridge for users who want their `cs` entries available on
+# multiple Macs without toggling iCloud Keychain sync in Keychain Access. The
+# encrypted bundle lives in iCloud Drive and is decryptable only with the
+# master passphrase you choose (never stored anywhere).
+#
+# Requires: `age` (brew install age).
+
+set -u
+
+CS_NAMESPACE="${CS_NAMESPACE:-cs}"
+ICLOUD_DIR="$HOME/Library/Mobile Documents/com~apple~CloudDocs"
+SYNC_FILE="$ICLOUD_DIR/claude-secrets-${CS_NAMESPACE}.age"
+THIS_DIR="$(cd "$(dirname "$0")" && pwd)"
+CS="$THIS_DIR/cs"
+
+require() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        echo "claude-secrets: \`$1\` is required for sync (run: brew install $1)." >&2
+        exit 3
+    fi
+}
+
+require age
+
+if [ ! -d "$ICLOUD_DIR" ]; then
+    echo "iCloud Drive isn't enabled (~/Library/Mobile Documents/com~apple~CloudDocs missing)." >&2
+    echo "Turn it on in System Settings → Apple ID → iCloud → Drive, then retry." >&2
+    exit 3
+fi
+
+cmd_export() {
+    local tmp; tmp=$(mktemp -t claude-secrets-export)
+    trap 'rm -f "$tmp"' EXIT
+    # Build a JSON object: { "namespace": "cs", "entries": {name: value, ...}, "exported_at": "..." }
+    {
+        echo '{'
+        echo "  \"namespace\": \"$CS_NAMESPACE\","
+        echo "  \"exported_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\","
+        echo '  "entries": {'
+        local first=1
+        for item in $("$CS" list); do
+            local bare="${item#$CS_NAMESPACE-}"
+            local val; val=$("$CS" get "$bare")
+            local esc; esc=$(printf '%s' "$val" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+            if [ "$first" = "0" ]; then echo ','; fi
+            printf '    "%s": %s' "$bare" "$esc"
+            first=0
+        done
+        echo
+        echo '  }'
+        echo '}'
+    } > "$tmp"
+
+    echo "Encrypting $(grep -c '":' "$tmp") entries..."
+    # age -p prompts for a passphrase interactively (no file-based key).
+    age -p -o "$SYNC_FILE" "$tmp"
+    echo "✔ exported to: $SYNC_FILE"
+    echo "iCloud will sync to your other Macs automatically (may take 30-60s)."
+}
+
+cmd_import() {
+    if [ ! -f "$SYNC_FILE" ]; then
+        echo "no sync file at: $SYNC_FILE" >&2
+        echo "Run \`cs-sync export\` on your other Mac first." >&2
+        exit 1
+    fi
+    local tmp; tmp=$(mktemp -t claude-secrets-import)
+    trap 'rm -f "$tmp"' EXIT
+    echo "Decrypting $SYNC_FILE..."
+    age -d -o "$tmp" "$SYNC_FILE"
+
+    # Parse JSON, iterate entries, kc_set each.
+    python3 <<PY
+import json, subprocess, sys
+data = json.load(open("$tmp"))
+ns = data.get("namespace", "$CS_NAMESPACE")
+count = 0
+for name, value in data.get("entries", {}).items():
+    subprocess.run(["security", "add-generic-password", "-U", "-a", "$USER",
+                    "-s", f"{ns}-{name}", "-w", value], check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    print(f"imported: {ns}-{name}")
+    count += 1
+print(f"\n{count} entries imported into namespace \"{ns}\"")
+PY
+}
+
+cmd_status() {
+    if [ -f "$SYNC_FILE" ]; then
+        echo "sync file: $SYNC_FILE"
+        echo "size:      $(du -h "$SYNC_FILE" | cut -f1)"
+        echo "modified:  $(stat -f "%Sm" "$SYNC_FILE")"
+    else
+        echo "no sync file yet at: $SYNC_FILE"
+        echo "Run \`cs-sync export\` to create one."
+    fi
+}
+
+case "${1:-status}" in
+    export) cmd_export ;;
+    import) cmd_import ;;
+    status) cmd_status ;;
+    *)      echo "usage: cs-sync {export|import|status}" >&2; exit 2 ;;
+esac
