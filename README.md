@@ -15,15 +15,14 @@ It's named after Claude Code because that's where the maintainer felt the pain f
 
 While building [Dibibu](https://dibibu.com) — a US warehouse rental marketplace — I kept pasting API tokens (Hostinger, Cloudflare, Stripe, R2, OpenAI, Anthropic, Resend, etc.) into Claude Code chats whenever the agent needed to call an external service. Every paste is a secret in conversation logs forever.
 
-I looked at the alternatives:
+What I needed was simple: a place to keep tokens that:
 
-- **1Password CLI** — solid, but $5/month for the "I just need API tokens" use case
-- **Bitwarden CLI** — free, but cloud-dependent and needs a separate account
-- **`pass`** — clean Unix tool, but GPG setup is a chore and the UX is hostile to non-Unix-natives
-- **`.env` files / `~/.zshrc` exports** — plain text, leaks in screenshots and Time Machine backups
-- **iCloud Keychain via Apple Passwords app** — encrypted and free, but no good CLI access for shell automation
+- doesn't require a separate cloud account or monthly subscription
+- works from the terminal so agents and scripts can pull from it
+- isn't a plain-text dotfile that leaks via screenshots and Time Machine backups
+- doesn't require me to learn a new key-management system on top of what macOS already has
 
-None had the right shape. So I wrote this in a couple of hours: a thin wrapper around Apple's built-in Keychain, a tiny browser UI for the moments you'd rather click than type, zero dependencies, audit-able in five minutes. Open source under MIT so you can read every line.
+So I wrote this in a couple of hours: a thin wrapper around Apple's built-in Keychain, a tiny browser UI for the moments you'd rather click than type, zero dependencies, audit-able in five minutes. Open source under MIT so you can read every line.
 
 ```
 $ cs add          # open browser UI, fill in label + token, save
@@ -304,22 +303,6 @@ For a fully scriptable cross-device flow without GUI toggling, see `examples/icl
 - Tokens are stored in `login.keychain-db` exactly the way Apple's Keychain Access app stores Safari passwords.
 - The Python script source is short (≈300 lines, single file) and contains zero third-party imports — audit it yourself in a couple of minutes.
 - `cs load` outputs to stdout so it never writes secrets to disk. Pair with `source <(...)` so they live in shell memory only.
-
-## Prior art
-
-The "secrets for AI agents" space got crowded in late 2024 / early 2025. Here's an honest map:
-
-| Project | What it is | When to prefer it over `cs` |
-|---|---|---|
-| [Noxkey](https://github.com/No-Box-Dev/Noxkey) | macOS Keychain GUI + menu bar app, Touch ID gated | You want a packaged menu-bar app instead of a CLI + browser tab. |
-| [secretless-ai](https://github.com/opena2a-org/secretless-ai) | Proxy that keeps secrets out of LLM context for Claude Code / Cursor / Copilot / Windsurf | You're cross-platform and your secrets need to live behind a proxy that filters multiple AI providers. |
-| [mcp-secrets-plugin](https://github.com/amirshk/mcp-secrets-plugin) | Cross-platform Python keychain library for MCP servers | You're building an MCP server in Python and want a library, not an end-user tool. |
-| [Vaulted](https://www.vaulted.fyi) | MCP-server-style secret broker; model never sees plaintext | You want a hosted broker and don't mind the architectural commitment. |
-| [pass](https://www.passwordstore.org/) / [gopass](https://www.gopass.pw/) | GPG-based Unix password managers | You live in GPG-key-land already and want git-versioned, cross-machine sync via plain files. |
-| 1Password CLI / Bitwarden CLI | Commercial / cloud password managers with CLI | You already pay for these (or want SSO / team sharing). |
-| `.env` + `direnv` | Plain-text dotfile per project | You don't care about encryption, only about not committing keys to git. |
-
-**Where `cs` fits:** Mac-native, $0 forever, no third-party dependencies for the core (CLI + UI), MIT-licensed. Single bash file + single Python file you can read end-to-end before trusting. If you want a menu-bar app with Touch ID prompts on every read, Noxkey is more polished. If you want cross-platform proxy filtering for AI providers, secretless-ai is the play. If you want a tool you can audit in a coffee break and that works exactly the way Apple's Keychain Access already works, you're in the right repo.
 
 ## Roadmap
 
