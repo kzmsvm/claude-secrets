@@ -4,6 +4,8 @@
 #   cs add                  open browser UI to add a new secret
 #   cs ui-status             show URL/PID of running UI (or "not running")
 #   cs ui-stop               kill running UI server
+#   cs autostart-install     run UI at every macOS login (LaunchAgent)
+#   cs autostart-remove      disable login autostart
 #   cs list                  list stored secrets (names only)
 #   cs get <name>            print secret value to stdout
 #   cs set <name> <val>      set secret (or update)
@@ -138,6 +140,66 @@ cmd_ui_stop() {
     rm -f "$lock"
 }
 
+# Install a macOS LaunchAgent so the UI server starts at login + restarts on crash.
+cmd_autostart_install() {
+    local agent_dir="$HOME/Library/LaunchAgents"
+    local plist="$agent_dir/com.claude-secrets.ui.plist"
+    local script_dir; script_dir="$(cd "$(dirname "$0")/.." && pwd)"
+    local python_bin; python_bin="$(command -v python3)"
+    [ -z "$python_bin" ] && { echo "python3 not found in PATH" >&2; return 2; }
+
+    mkdir -p "$agent_dir"
+    cat > "$plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.claude-secrets.ui</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${python_bin}</string>
+        <string>${script_dir}/ui/add-secret.py</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>${TMPDIR:-/tmp}/claude-secrets-ui.log</string>
+    <key>StandardErrorPath</key>
+    <string>${TMPDIR:-/tmp}/claude-secrets-ui.err</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>CS_NAMESPACE</key>
+        <string>${CS_NAMESPACE}</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+    </dict>
+</dict>
+</plist>
+PLIST
+    launchctl unload "$plist" 2>/dev/null || true
+    launchctl load "$plist"
+    sleep 0.5
+    echo "✔ autostart enabled — UI will run on every login and restart on crash"
+    echo "  plist: $plist"
+    echo "  logs:  ${TMPDIR:-/tmp}/claude-secrets-ui.log  (errors: …ui.err)"
+    cmd_ui_status
+}
+
+cmd_autostart_remove() {
+    local plist="$HOME/Library/LaunchAgents/com.claude-secrets.ui.plist"
+    if [ ! -f "$plist" ]; then
+        echo "no autostart installed"; return 1
+    fi
+    launchctl unload "$plist" 2>/dev/null || true
+    rm -f "$plist"
+    echo "✔ autostart removed"
+    # Stop any currently running UI too
+    cmd_ui_stop 2>/dev/null || true
+}
+
 # Import KEY=value lines from a .env-style file into the current namespace.
 # Existing entries are overwritten (security CLI's -U flag). Quotes stripped.
 # Lines starting with # or empty are ignored.
@@ -199,8 +261,10 @@ case "$sub" in
     export) cmd_export "$@" ;;
     load)   cmd_load   "$@" ;;
     add|ui) cmd_ui     "$@" ;;
-    ui-status) cmd_ui_status "$@" ;;
-    ui-stop)   cmd_ui_stop   "$@" ;;
+    ui-status)       cmd_ui_status        "$@" ;;
+    ui-stop)         cmd_ui_stop          "$@" ;;
+    autostart-install) cmd_autostart_install "$@" ;;
+    autostart-remove)  cmd_autostart_remove  "$@" ;;
     import) cmd_import "$@" ;;
     help|-h|--help) usage ;;
     *)      echo "unknown command: $sub" >&2; usage; exit 2 ;;

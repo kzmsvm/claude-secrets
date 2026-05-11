@@ -45,3 +45,22 @@ echo "Try it:"
 echo "    cs add        # open the browser UI"
 echo "    cs list       # show stored entries"
 echo "    source <(cs load)   # export all as \$ENV_VAR"
+echo
+
+# --- Optional: autostart prompt ---
+# Skip if installer is being piped (no tty), or CS_AUTOSTART env already set.
+if [ -t 0 ] && [ -z "${CS_AUTOSTART:-}" ]; then
+    printf "Enable autostart so the UI runs on every login (Y/n)? "
+    read -r reply
+else
+    reply="${CS_AUTOSTART:-n}"
+fi
+
+case "${reply:-y}" in
+    y|Y|yes|YES|"")
+        "$BIN_DIR/cs" autostart-install
+        ;;
+    *)
+        echo "Skipped autostart. Run 'cs autostart-install' any time to enable later."
+        ;;
+esac

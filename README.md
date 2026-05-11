@@ -80,7 +80,19 @@ cs add
 
 A browser tab opens at `http://127.0.0.1:9876`. Fill in:
 
-> If a UI is already running for the current namespace, `cs add` just reopens the existing tab instead of starting a second server — no port conflicts, no orphan processes. Close the server with `Ctrl-C` in the original terminal, or `kill <pid>` (the PID is printed on each run).
+> If a UI is already running for the current namespace, `cs add` just reopens the existing tab instead of starting a second server — no port conflicts, no orphan processes. Close the server with `Ctrl-C` in the original terminal, or `cs ui-stop`.
+
+### Always-on UI (optional)
+
+If you want the UI server to run automatically at every macOS login (so you can just open the browser bookmark without thinking about it), enable autostart:
+
+```bash
+cs autostart-install     # installs a LaunchAgent; survives reboots; auto-restart on crash
+cs ui-status             # confirms it's running + shows the current URL
+cs autostart-remove      # disables it later if you change your mind
+```
+
+This drops a single `.plist` at `~/Library/LaunchAgents/com.claude-secrets.ui.plist` and loads it via `launchctl`. The server uses ~20 MB and binds only to `127.0.0.1`. The installer (`install.sh`) also asks once during first setup so you don't have to remember.
 
 
 - **Label** — what the secret is for. Auto-slugified (`Stripe Prod!` becomes `stripe-prod`).
