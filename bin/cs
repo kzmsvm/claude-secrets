@@ -2,6 +2,8 @@
 # claude-secrets CLI dispatcher.
 # Usage:
 #   cs add                  open browser UI to add a new secret
+#   cs ui-status             show URL/PID of running UI (or "not running")
+#   cs ui-stop               kill running UI server
 #   cs list                  list stored secrets (names only)
 #   cs get <name>            print secret value to stdout
 #   cs set <name> <val>      set secret (or update)
@@ -102,6 +104,40 @@ cmd_ui() {
     exec python3 "$script_dir/ui/add-secret.py"
 }
 
+# Print the URL of the running UI (helps when you forget which port it's on).
+cmd_ui_status() {
+    local lock="${TMPDIR:-/tmp}/claude-secrets-ui-${USER}-${CS_NAMESPACE}.lock"
+    if [ -f "$lock" ]; then
+        local port pid
+        port=$(python3 -c "import json; print(json.load(open('$lock'))['port'])" 2>/dev/null)
+        pid=$(python3 -c "import json; print(json.load(open('$lock'))['pid'])" 2>/dev/null)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            echo "UI running: http://127.0.0.1:${port}  (PID ${pid})"
+            return 0
+        fi
+        # stale lockfile
+        rm -f "$lock"
+    fi
+    echo "no UI running for namespace \"$CS_NAMESPACE\". Start with: cs add"
+    return 1
+}
+
+cmd_ui_stop() {
+    local lock="${TMPDIR:-/tmp}/claude-secrets-ui-${USER}-${CS_NAMESPACE}.lock"
+    if [ ! -f "$lock" ]; then
+        echo "no UI running for namespace \"$CS_NAMESPACE\""; return 1
+    fi
+    local pid
+    pid=$(python3 -c "import json; print(json.load(open('$lock'))['pid'])" 2>/dev/null)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        kill "$pid"
+        echo "stopped UI (PID $pid)"
+    else
+        echo "lockfile pointed at dead PID, cleaning up"
+    fi
+    rm -f "$lock"
+}
+
 # Import KEY=value lines from a .env-style file into the current namespace.
 # Existing entries are overwritten (security CLI's -U flag). Quotes stripped.
 # Lines starting with # or empty are ignored.
@@ -163,6 +199,8 @@ case "$sub" in
     export) cmd_export "$@" ;;
     load)   cmd_load   "$@" ;;
     add|ui) cmd_ui     "$@" ;;
+    ui-status) cmd_ui_status "$@" ;;
+    ui-stop)   cmd_ui_stop   "$@" ;;
     import) cmd_import "$@" ;;
     help|-h|--help) usage ;;
     *)      echo "unknown command: $sub" >&2; usage; exit 2 ;;
