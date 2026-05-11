@@ -282,10 +282,27 @@ claude mcp add cs-secrets python3 /Users/yourname/.claude-secrets/mcp/cs-mcp-ser
 Then ask Claude something like "use my Stripe key to list customers". The flow becomes:
 
 1. Claude calls `cs_list` → sees `stripe-secret` is available.
-2. Claude calls `cs_inject({name: "stripe-secret"})` → server writes the value into `/tmp/cs-stripe-secret-abc.secret` (mode 0600), schedules a 60-second self-delete, returns just the **path**.
-3. Claude runs `curl -H "Authorization: Bearer $(cat /tmp/cs-stripe-secret-abc.secret)" ...` — the literal value is read by `cat` into stdin, never appears in the tool result text.
+2. Claude calls `cs_describe({name: "stripe-secret"})` → reads the note you attached (`"Stripe live key, Bearer auth against api.stripe.com..."`) so it knows what to do with the value.
+3. Claude calls `cs_inject({name: "stripe-secret"})` → server writes the value into `/tmp/cs-stripe-secret-abc.secret` (mode `0600`), schedules a self-delete in 300 seconds (5 min — configurable per call with `ttl_seconds`, max 3600), returns just the **path**.
+4. Claude saves the path in a bash variable and re-uses it for as many commands as needed inside the TTL window:
+   ```bash
+   CS_FILE=/var/folders/.../cs-stripe-secret-abc.secret
+   curl -H "Authorization: Bearer $(cat $CS_FILE)" https://api.stripe.com/v1/customers
+   curl -H "Authorization: Bearer $(cat $CS_FILE)" https://api.stripe.com/v1/charges
+   ```
+   `cs_inject` is called **once per session**, not per command — the literal value never appears in chat, in the tool result text, or in the model's context.
+5. Optional: Claude calls `cs_release({path: "..."})` when done, to delete the temp file immediately instead of waiting out the TTL.
 
-No third-party packages — the MCP server is pure stdlib Python, ~200 lines, audit-able in five minutes.
+No third-party packages — the MCP server is pure stdlib Python, ~250 lines, audit-able in five minutes.
+
+### Tools the MCP server exposes
+
+| Tool | What it does |
+|---|---|
+| `cs_list` | List available secret names (no values, `__meta` entries hidden). |
+| `cs_describe(name)` | Length + free-form note attached via `cs note <name> "..."`. Helps the model know what kind of credential it is before fetching. |
+| `cs_inject(name, ttl_seconds?)` | Write the value to a `0600` temp file, return only the path. Default TTL 300s, range 10–3600s. |
+| `cs_release(path)` | Delete a temp file from a previous `cs_inject` call. Refuses paths outside `TMPDIR/cs-*.secret`. |
 
 ## How it works
 
