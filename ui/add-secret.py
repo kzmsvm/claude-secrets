@@ -416,15 +416,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 def find_free_port(start: int) -> int:
-    p = start
-    for _ in range(40):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            try:
-                s.bind(("127.0.0.1", p))
-                return p
-            except OSError:
-                p += 1
-    raise RuntimeError("no free port near %d" % start)
+    """Pin to the requested port — fail loudly if it's busy instead of silently
+    drifting up. Drifting confuses users who bookmarked the original port."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind(("127.0.0.1", start))
+            return start
+        except OSError as e:
+            raise RuntimeError(
+                f"port {start} is already in use. Something else (or an orphan UI) "
+                f"is listening there. Run `cs ui-status` to see what's up, "
+                f"or `lsof -i :{start} -P -n` to find the culprit. "
+                f"Set CS_PORT=<other> to use a different port."
+            ) from e
 
 
 def _lockfile() -> str:
