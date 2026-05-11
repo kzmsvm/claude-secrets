@@ -11,6 +11,24 @@ It's named after Claude Code because that's where the maintainer felt the pain f
 
 > **macOS only.** `cs` shells out to Apple's `security` CLI to talk to the Keychain. It will refuse to run on Linux or Windows (`exit 2` with a message) instead of pretending to work. Native Linux (libsecret) and Windows (DPAPI / Credential Manager) backends are on the [Roadmap](#roadmap); contributions welcome.
 
+## When do I need what?
+
+`cs` has three runtime surfaces — knowing which one you actually need saves a lot of confusion:
+
+| Surface | Need it running? | When |
+|---|---|---|
+| **CLI** (`cs get`, `cs load`, `cs set`, `cs list`) | No server needed — works any time | Daily use. Pulling tokens into a shell, scripts, cron. |
+| **MCP server** | Auto-managed by Claude Code | If you use Claude Code / Cursor / Aider etc. Set up once with `claude mcp add`; it spawns on demand. |
+| **Browser UI** | Only while you're using it | When you want to **add** or **edit** an entry without writing CLI flags. Start with `cs add`, close with `cs ui-stop` (or `Ctrl-C`). |
+
+**You don't need to leave anything running all the time.** Daily flow is:
+
+1. Open a terminal → secrets are already loaded as env vars (one line in `~/.zshrc`).
+2. Use Claude Code → the MCP server is spawned automatically when it asks for a secret.
+3. Need to add a new token? → `cs add`, type it in, close the tab, you're done.
+
+The "always-on UI" (`cs autostart-install`) is the **rare** case. Only enable it if you want a browser bookmark to `127.0.0.1:9876` to be always-clickable. For everyone else, on-demand is fine.
+
 ## Why I built this
 
 While building [Dibibu](https://dibibu.com) — a US warehouse rental marketplace — I kept pasting API tokens (Hostinger, Cloudflare, Stripe, R2, OpenAI, Anthropic, Resend, etc.) into Claude Code chats whenever the agent needed to call an external service. Every paste is a secret in conversation logs forever.
