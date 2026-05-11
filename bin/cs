@@ -9,6 +9,8 @@
 #   cs list                  list stored secrets (names only)
 #   cs get <name>            print secret value to stdout
 #   cs set <name> <val>      set secret (or update)
+#   cs note <name> "<text>"  attach / read a free-form description note
+#   cs describe <name>       show length + note (without revealing value)
 #   cs rm  <name>            delete secret
 #   cs load                  export all secrets as env vars (run with `source`)
 #   cs export <name>         print as `export KEY=value` for shell sourcing
@@ -41,6 +43,68 @@ cmd_set() {
     echo "stored: $CS_NAMESPACE-$name"
 }
 
+# Attach / read metadata notes for an entry.
+# Metadata is stored as a sibling entry "<name>__meta" so it's separate from
+# the actual secret — listing it shows up but it's purely descriptive.
+_kc_read_decoded() {
+    # security CLI returns hex for values that aren't pure ASCII (e.g. notes
+    # with em-dashes). Detect and decode.
+    local raw="$1"
+    if echo "$raw" | grep -qE '^[0-9a-f]+$' && [ $((${#raw} % 2)) -eq 0 ] && [ ${#raw} -gt 4 ]; then
+        echo "$raw" | xxd -r -p
+    else
+        printf '%s\n' "$raw"
+    fi
+}
+
+cmd_note() {
+    local name="${1:-}" note="${2:-}"
+    if [ -z "$name" ]; then
+        echo "usage: cs note <name> [\"<text>\"]    (omit text to print existing note)" >&2; return 2
+    fi
+    local meta_key="${name}__meta"
+    if [ -z "$note" ]; then
+        # Read mode
+        local existing
+        existing=$(security find-generic-password -a "$USER" -s "$CS_NAMESPACE-$meta_key" -w 2>/dev/null)
+        if [ -n "$existing" ]; then
+            _kc_read_decoded "$existing"
+        else
+            echo "(no note set for $CS_NAMESPACE-$name)" >&2
+            return 1
+        fi
+    else
+        # Write mode
+        security add-generic-password -U -a "$USER" -s "$CS_NAMESPACE-$meta_key" -w "$note" >/dev/null 2>&1
+        echo "note saved for: $CS_NAMESPACE-$name"
+    fi
+}
+
+# Describe an entry — value length + sibling metadata in one shot.
+# Designed so an AI agent can call this BEFORE cs_inject to know what
+# to do with the secret (ftp creds? bearer token? SSH private key?).
+cmd_describe() {
+    local name="${1:-}"
+    if [ -z "$name" ]; then
+        echo "usage: cs describe <name>" >&2; return 2
+    fi
+    local val len note
+    val=$(security find-generic-password -a "$USER" -s "$CS_NAMESPACE-$name" -w 2>/dev/null)
+    if [ -z "$val" ]; then
+        echo "no entry: $CS_NAMESPACE-$name" >&2; return 1
+    fi
+    len=${#val}
+    note=$(security find-generic-password -a "$USER" -s "$CS_NAMESPACE-${name}__meta" -w 2>/dev/null)
+    echo "name:         $CS_NAMESPACE-$name"
+    echo "value_length: $len chars"
+    if [ -n "$note" ]; then
+        echo "note: |"
+        _kc_read_decoded "$note" | sed 's/^/  /'
+    else
+        echo "note:         (none — set with: cs note $name \"...\")"
+    fi
+}
+
 cmd_get() {
     local name="${1:-}"
     if [ -z "$name" ]; then
@@ -64,9 +128,12 @@ cmd_rm() {
 
 cmd_list() {
     # Dump login keychain and grep for our namespace prefix.
+    # Filter out '__meta' companion entries — those are notes for cs_describe,
+    # not secrets, and shouldn't pollute the list output.
     security dump-keychain 2>/dev/null \
       | grep -E '"svce".*"'"$CS_NAMESPACE"'-' \
       | sed -E 's/.*"('"$CS_NAMESPACE"'-[^"]+)".*/\1/' \
+      | grep -v '__meta$' \
       | sort -u
 }
 
@@ -254,12 +321,14 @@ require_macos
 sub="${1:-help}"
 shift || true
 case "$sub" in
-    set)    cmd_set    "$@" ;;
-    get)    cmd_get    "$@" ;;
-    rm)     cmd_rm     "$@" ;;
-    list|ls)cmd_list   "$@" ;;
-    export) cmd_export "$@" ;;
-    load)   cmd_load   "$@" ;;
+    set)      cmd_set      "$@" ;;
+    get)      cmd_get      "$@" ;;
+    rm)       cmd_rm       "$@" ;;
+    list|ls)  cmd_list     "$@" ;;
+    export)   cmd_export   "$@" ;;
+    load)     cmd_load     "$@" ;;
+    note)     cmd_note     "$@" ;;
+    describe) cmd_describe "$@" ;;
     add|ui) cmd_ui     "$@" ;;
     ui-status)       cmd_ui_status        "$@" ;;
     ui-stop)         cmd_ui_stop          "$@" ;;
