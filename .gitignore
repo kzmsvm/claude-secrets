@@ -1,3 +1,19 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# Local secret files — should never enter the repo. Belt + braces in case
+# someone accidentally drops one here while testing.
+*.env
+*.env.*
+.envrc
+*.key
+*.pem
+*.p12
+*.pfx
+*secrets*.json
+*secrets*.txt
+*token*.txt
+*credentials*.json
+*.age
+*.gpg
