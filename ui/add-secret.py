@@ -52,6 +52,26 @@ def kc_list() -> list[str]:
 def kc_rm(name: str) -> None:
     _security("delete-generic-password", "-s", f"{NAMESPACE}-{name}")
 
+def _decode_hex_if_needed(raw: str) -> str:
+    """`security` returns hex when a value isn't pure ASCII (em-dash, unicode)."""
+    s = raw.rstrip("\n")
+    if len(s) > 4 and len(s) % 2 == 0 and all(c in "0123456789abcdef" for c in s):
+        try:
+            return bytes.fromhex(s).decode("utf-8", errors="replace")
+        except Exception:
+            return s
+    return s
+
+def kc_get_for(name: str) -> str | None:
+    """Read a value from the Keychain by bare name (without namespace prefix)."""
+    p = subprocess.run(
+        ["security", "find-generic-password", "-a", USER, "-s", f"{NAMESPACE}-{name}", "-w"],
+        capture_output=True, text=True,
+    )
+    if p.returncode != 0:
+        return None
+    return _decode_hex_if_needed(p.stdout)
+
 def slugify(s: str) -> str:
     s = s.strip().lower()
     s = re.sub(r"[^a-z0-9]+", "-", s)
@@ -132,6 +152,10 @@ button.secondary:hover { background: #334155; }
     </div>
 
     <div id="fields"></div>
+
+    <label for="note" style="margin-top:14px;">Note / description <span style="text-transform:none; color:#64748b; font-weight:400;">(optional but recommended)</span></label>
+    <textarea id="note" rows="3" placeholder="What kind of credential is this? e.g. 'FTP password for ftp.example.com, user backup. For nightly downloads.' or 'OpenAI API key — Bearer auth. Used by openai-python SDK.'" style="font-family:inherit; resize:vertical;"></textarea>
+    <div class="hint">An AI agent reads this BEFORE injecting the value so it knows how to use the credential. Plain English is fine.</div>
 
     <div class="actions">
       <button id="save" type="button">Save to Keychain</button>
@@ -351,8 +375,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
         elif self.path == "/list":
-            items = [s[len(NAMESPACE) + 1:] for s in kc_list()]
+            # Hide '__meta' sibling entries — they're notes for the model, not secrets.
+            # The frontend reads them via /note instead.
+            items = [
+                s[len(NAMESPACE) + 1:] for s in kc_list()
+                if not s.endswith("__meta")
+            ]
             self._json(200, {"items": items})
+
+        elif self.path.startswith("/note/"):
+            # GET /note/<bare-name>  → returns the attached note, if any.
+            name = self.path[len("/note/"):]
+            note_value = kc_get_for(f"{name}__meta")
+            self._json(200, {"name": name, "note": note_value or ""})
         else:
             self.send_error(404)
 
@@ -370,6 +405,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path == "/save":
             name = slugify(str(data.get("name", "")))
             entries = data.get("entries", []) or []
+            note  = str(data.get("note", "")).strip()
             if not name or not entries:
                 self._json(400, {"ok": False, "error": "name and entries required"}); return
             stored: list[str] = []
@@ -382,7 +418,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     full = name if sx in ("value", "") else f"{name}-{sx}"
                     kc_set(full, val)
                     stored.append(full)
+                # Companion __meta entry for free-form description.
+                if note:
+                    kc_set(f"{name}__meta", note)
+                    stored.append(f"{name}__meta (note)")
                 self._json(200, {"ok": True, "stored": stored})
+            except Exception as ex:
+                self._json(500, {"ok": False, "error": str(ex)})
+
+        elif self.path == "/note":
+            # POST /note  body: {"name": "...", "note": "..."}
+            name = str(data.get("name", "")).strip()
+            note = str(data.get("note", ""))
+            if not name:
+                self._json(400, {"ok": False, "error": "name required"}); return
+            # Strip prefix if caller passed full keychain name.
+            bare = name[len(NAMESPACE) + 1:] if name.startswith(f"{NAMESPACE}-") else name
+            try:
+                if note:
+                    kc_set(f"{bare}__meta", note)
+                else:
+                    kc_rm(f"{bare}__meta")
+                self._json(200, {"ok": True})
             except Exception as ex:
                 self._json(500, {"ok": False, "error": str(ex)})
         elif self.path == "/rm":
