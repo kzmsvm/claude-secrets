@@ -115,16 +115,35 @@ TOOLS = [
         "description": (
             "Materialize a stored secret into a short-lived 0600 temp file and "
             "return that file's path. Useful for piping the value into a CLI "
-            "without putting it in chat context. The file is deleted after "
-            "first read or after 60 seconds — whichever comes first. "
-            "RECOMMENDED: call `cs_describe` first to know what to do with the value."
+            "without putting it in chat context. The file self-deletes after the "
+            "TTL (default 5 minutes — enough to compose and run a command). "
+            "RECOMMENDED: call `cs_describe` first to know what to do with the value. "
+            "After you're done, call `cs_release(path)` to delete the file immediately "
+            "instead of waiting out the TTL."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "name": {"type": "string", "description": "Short name of the secret (without `cs-` prefix)."},
+                "ttl_seconds": {"type": "integer", "description": "Optional self-delete delay; default 300 (5 min), min 10, max 3600.", "minimum": 10, "maximum": 3600},
             },
             "required": ["name"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "cs_release",
+        "description": (
+            "Explicitly delete a temp file produced by `cs_inject`, so the secret "
+            "doesn't linger on disk for the rest of its TTL. Safe to call multiple "
+            "times — a missing file is not an error."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Path returned by a previous cs_inject call."},
+            },
+            "required": ["path"],
             "additionalProperties": False,
         },
     },
@@ -132,7 +151,9 @@ TOOLS = [
 
 # ---------- Tool implementations ----------
 
-def _ttl_unlink(path: str, ttl: float = 60.0) -> None:
+DEFAULT_INJECT_TTL = int(os.environ.get("CS_INJECT_TTL", "300"))  # 5 minutes default
+
+def _ttl_unlink(path: str, ttl: float = DEFAULT_INJECT_TTL) -> None:
     def _kill():
         time.sleep(ttl)
         try:
@@ -177,6 +198,11 @@ def tool_cs_inject(args: dict) -> dict:
     name = (args.get("name") or "").strip()
     if not name:
         return {"content": [{"type": "text", "text": "error: `name` required"}], "isError": True}
+    raw_ttl = args.get("ttl_seconds", DEFAULT_INJECT_TTL)
+    try:
+        ttl = max(10, min(3600, int(raw_ttl)))
+    except Exception:
+        ttl = DEFAULT_INJECT_TTL
     value = kc_get(name)
     if value is None:
         return {"content": [{"type": "text", "text": f"error: no secret named '{name}'"}], "isError": True}
@@ -186,23 +212,41 @@ def tool_cs_inject(args: dict) -> dict:
         os.write(fd, value.encode("utf-8"))
     finally:
         os.close(fd)
-    _ttl_unlink(path, ttl=60.0)
+    _ttl_unlink(path, ttl=ttl)
     return {
         "content": [{
             "type": "text",
             "text": (
-                f"Secret materialized to a one-shot 0600 file:\n  {path}\n\n"
-                f"Read it ONCE (it will self-delete in 60s). Example uses:\n"
+                f"Secret materialized to a 0600 file:\n  {path}\n\n"
+                f"Self-deletes in {ttl}s (or call `cs_release` to delete it now).\n"
+                f"Example uses:\n"
                 f"  curl -H \"Authorization: Bearer $(cat '{path}')\" https://api.example.com/...\n"
-                f"  export FOO=$(cat '{path}'); ... ; rm -f '{path}'"
+                f"  rsync -e \"sshpass -f '{path}' ssh -p 22\" ... user@host:/path/\n"
+                f"  export FOO=$(cat '{path}'); ...; rm -f '{path}'"
             ),
         }]
     }
+
+def tool_cs_release(args: dict) -> dict:
+    path = (args.get("path") or "").strip()
+    if not path:
+        return {"content": [{"type": "text", "text": "error: `path` required"}], "isError": True}
+    # Only allow deleting files we created (TMPDIR + our prefix).
+    if not (path.startswith(tempfile.gettempdir()) and "/cs-" in path and path.endswith(".secret")):
+        return {"content": [{"type": "text", "text": f"error: refusing to delete {path} — not a cs_inject path"}], "isError": True}
+    try:
+        os.unlink(path)
+        return {"content": [{"type": "text", "text": f"deleted: {path}"}]}
+    except FileNotFoundError:
+        return {"content": [{"type": "text", "text": f"already gone: {path}"}]}
+    except Exception as ex:
+        return {"content": [{"type": "text", "text": f"error: {ex}"}], "isError": True}
 
 TOOL_DISPATCH = {
     "cs_list":     tool_cs_list,
     "cs_describe": tool_cs_describe,
     "cs_inject":   tool_cs_inject,
+    "cs_release":  tool_cs_release,
 }
 
 # ---------- JSON-RPC over stdio ----------
