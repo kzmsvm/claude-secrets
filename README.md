@@ -69,15 +69,25 @@ Whenever you work in a terminal or chat with an AI agent, you end up reaching fo
 
 ## Install
 
-```bash
-git clone https://github.com/kzmsvm/claude-secrets ~/.claude-secrets
-ln -s ~/.claude-secrets/bin/cs /usr/local/bin/cs
-```
-
-Or one-liner:
+One-liner (the installer asks three setup questions interactively):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/kzmsvm/claude-secrets/main/install.sh | bash
+```
+
+The interactive prompts are:
+
+1. **Auto-load secrets in every new terminal?** Adds one line to `~/.zshrc` so `$GITHUB_TOKEN`, `$STRIPE_SECRET`, etc. are pre-populated in every shell. Recommended: **Y**.
+2. **Install the MCP server in Claude Code?** Lets Claude / Cursor / Aider request a secret without ever seeing the literal value in chat. Recommended: **Y** if you use Claude Code.
+3. **Run the browser UI at every login?** Only worth it if you add/edit tokens often. For day-to-day `cs get` / `cs load` / MCP use, the UI doesn't need to be running. Recommended: **N** — just run `cs add` on demand.
+
+Run non-interactively (CI, automated provisioning) by piping or setting `CS_NONINTERACTIVE=1` — the installer prints the manual commands for each step instead of prompting.
+
+Manual install (no installer):
+
+```bash
+git clone https://github.com/kzmsvm/claude-secrets ~/.claude-secrets
+ln -s ~/.claude-secrets/bin/cs /usr/local/bin/cs
 ```
 
 Requires:
@@ -204,7 +214,11 @@ aws s3 sync ./dist s3://my-bucket --profile prod # uses $AWS_PROD_*
 
 | Command | Description |
 |---|---|
-| `cs add` (alias `cs ui`) | Open browser UI to add / edit / delete entries |
+| `cs add` (alias `cs ui`) | Open browser UI to add / edit / delete entries (port `9876`, reuses an existing instance) |
+| `cs ui-status` | Show the URL + PID of the running UI, or "not running" |
+| `cs ui-stop` | Stop the running UI server |
+| `cs autostart-install` | Install a macOS LaunchAgent so the UI starts at every login + auto-restarts on crash |
+| `cs autostart-remove` | Disable login autostart |
 | `cs set <name> <value>` | Store / update a secret from the CLI |
 | `cs get <name>` | Print one secret to stdout |
 | `cs list` (alias `cs ls`) | List stored entry names |
@@ -212,7 +226,13 @@ aws s3 sync ./dist s3://my-bucket --profile prod # uses $AWS_PROD_*
 | `cs load` | Print `export …` for every entry (pair with `source <(cs load)`) |
 | `cs rm <name>` | Delete an entry |
 | `cs import <file.env>` | Bulk-import from a `.env` file (KEY=value lines, supports `--dry-run`) |
-| `cs-sync export` / `import` | Multi-Mac sync via iCloud Drive + `age` encryption (optional, needs `brew install age`) |
+| `cs-sync export` / `import` / `status` | Multi-Mac sync via iCloud Drive + `age` encryption (optional, needs `brew install age`) |
+
+### Port behavior
+
+The UI binds to `127.0.0.1:9876` by default. If that port is occupied by something else, the script **fails loudly** with an error message instead of silently drifting to 9877, 9878, etc. — drifting was a source of "which URL is my browser bookmarked to?" confusion. Override with `CS_PORT=<n> cs add` if you genuinely need a different port. The same logic applies to the autostart LaunchAgent: it always tries 9876.
+
+When you run `cs add` and a UI for the same namespace is already running, the script reopens that tab instead of starting a second instance — no port collision, no orphan processes.
 
 ## Importing existing `.env` files
 
