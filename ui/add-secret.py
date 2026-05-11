@@ -18,6 +18,7 @@ import re
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import urllib.parse
 import webbrowser
@@ -426,13 +427,73 @@ def find_free_port(start: int) -> int:
     raise RuntimeError("no free port near %d" % start)
 
 
+def _lockfile() -> str:
+    """One lockfile per (user, namespace) so multiple namespaces can each have a UI."""
+    return os.path.join(
+        tempfile.gettempdir(),
+        f"claude-secrets-ui-{USER}-{NAMESPACE}.lock",
+    )
+
+
+def reuse_existing_if_alive() -> bool:
+    """If a cs-ui process is already running for this namespace, reopen its tab and return True."""
+    lock = _lockfile()
+    if not os.path.exists(lock):
+        return False
+    try:
+        with open(lock) as f:
+            data = json.load(f)
+        pid = int(data["pid"])
+        port = int(data["port"])
+    except Exception:
+        # Stale / corrupt lockfile — let the caller proceed and overwrite it.
+        try: os.unlink(lock)
+        except OSError: pass
+        return False
+
+    # Is the process still alive?
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        try: os.unlink(lock)
+        except OSError: pass
+        return False
+
+    # Does it respond on its claimed port?
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            pass
+    except OSError:
+        try: os.unlink(lock)
+        except OSError: pass
+        return False
+
+    url = f"http://127.0.0.1:{port}"
+    print(f"claude-secrets UI is already running for namespace \"{NAMESPACE}\".")
+    print(f"  → {url}  (PID {pid})")
+    print(f"Reopening that tab instead of starting a second server.")
+    print(f"To stop the running instance, run:  kill {pid}")
+    webbrowser.open(url)
+    return True
+
+
+def write_lockfile(port: int) -> None:
+    with open(_lockfile(), "w") as f:
+        json.dump({"pid": os.getpid(), "port": port}, f)
+
+
 def main() -> None:
     if sys.platform != "darwin":
         print("claude-secrets UI: macOS only (uses Keychain).", file=sys.stderr)
         sys.exit(2)
+
+    if reuse_existing_if_alive():
+        return
+
     port = find_free_port(PORT)
     url = f"http://127.0.0.1:{port}"
     server = http.server.HTTPServer(("127.0.0.1", port), Handler)
+    write_lockfile(port)
     print(f"claude-secrets UI ready: {url}")
     print("(loopback only; Ctrl-C to quit)")
     threading.Timer(0.4, lambda: webbrowser.open(url)).start()
@@ -441,6 +502,9 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\nbye.")
         server.shutdown()
+    finally:
+        try: os.unlink(_lockfile())
+        except OSError: pass
 
 
 if __name__ == "__main__":

@@ -80,6 +80,9 @@ cs add
 
 A browser tab opens at `http://127.0.0.1:9876`. Fill in:
 
+> If a UI is already running for the current namespace, `cs add` just reopens the existing tab instead of starting a second server — no port conflicts, no orphan processes. Close the server with `Ctrl-C` in the original terminal, or `kill <pid>` (the PID is printed on each run).
+
+
 - **Label** — what the secret is for. Auto-slugified (`Stripe Prod!` becomes `stripe-prod`).
 - **Type** — pick one:
   - **Single value** — most API tokens (`GitHub`, `OpenAI`, `Cloudflare`)
