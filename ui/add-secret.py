@@ -534,7 +534,8 @@ def reuse_existing_if_alive() -> bool:
     print(f"  → {url}  (PID {pid})")
     print(f"Reopening that tab instead of starting a second server.")
     print(f"To stop the running instance, run:  kill {pid}")
-    webbrowser.open(url)
+    if not os.environ.get("CS_NO_BROWSER"):
+        webbrowser.open(url)
     return True
 
 
@@ -557,7 +558,8 @@ def main() -> None:
     write_lockfile(port)
     print(f"claude-secrets UI ready: {url}")
     print("(loopback only; Ctrl-C to quit)")
-    threading.Timer(0.4, lambda: webbrowser.open(url)).start()
+    if not os.environ.get("CS_NO_BROWSER"):
+        threading.Timer(0.4, lambda: webbrowser.open(url)).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

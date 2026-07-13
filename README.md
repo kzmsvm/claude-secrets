@@ -13,13 +13,14 @@ It's named after Claude Code because that's where the maintainer felt the pain f
 
 ## When do I need what?
 
-`cs` has three runtime surfaces — knowing which one you actually need saves a lot of confusion:
+`cs` has four runtime surfaces — knowing which one you actually need saves a lot of confusion:
 
 | Surface | Need it running? | When |
 |---|---|---|
 | **CLI** (`cs get`, `cs load`, `cs set`, `cs list`) | No server needed — works any time | Daily use. Pulling tokens into a shell, scripts, cron. |
 | **MCP server** | Auto-managed by Claude Code | If you use Claude Code / Cursor / Aider etc. Set up once with `claude mcp add`; it spawns on demand. |
 | **Browser UI** | Only while you're using it | When you want to **add** or **edit** an entry without writing CLI flags. Start with `cs add`, close with `cs ui-stop` (or `Ctrl-C`). |
+| **Claude Code skill** (`/add-secret`) | No — Claude starts/stops the UI for you | Say "add api key" mid-session; the form opens in Claude Code's own browser pane, so the token never touches the chat. See [Claude Code skill](#claude-code-skill--add-secrets-without-leaving-the-app). |
 
 **You don't need to leave anything running all the time.** Daily flow is:
 
@@ -295,6 +296,12 @@ Then ask Claude something like "use my Stripe key to list customers". The flow b
 
 No third-party packages — the MCP server is pure stdlib Python, ~250 lines, audit-able in five minutes.
 
+**Tip:** register it with `--scope user` so it's available in every project on your Mac, not just the current one:
+
+```bash
+claude mcp add --scope user cs-secrets python3 /Users/yourname/.claude-secrets/mcp/cs-mcp-server.py
+```
+
 ### Tools the MCP server exposes
 
 | Tool | What it does |
@@ -303,6 +310,22 @@ No third-party packages — the MCP server is pure stdlib Python, ~250 lines, au
 | `cs_describe(name)` | Length + free-form note attached via `cs note <name> "..."`. Helps the model know what kind of credential it is before fetching. |
 | `cs_inject(name, ttl_seconds?)` | Write the value to a `0600` temp file, return only the path. Default TTL 300s, range 10–3600s. |
 | `cs_release(path)` | Delete a temp file from a previous `cs_inject` call. Refuses paths outside `TMPDIR/cs-*.secret`. |
+
+## Claude Code skill — add secrets without leaving the app
+
+The MCP server covers *reading* secrets. The `/add-secret` skill covers *adding* them: say "add api key" (in any language) and Claude opens the claude-secrets form **inside Claude Code's own browser pane**. You paste the token into the form — not into chat — and it goes straight to the Keychain. The value never touches the conversation transcript, and Claude confirms only the entry *name* afterwards.
+
+Install (skills in `~/.claude/skills/` are global to your user and survive app updates):
+
+```bash
+cp -r skills/add-secret ~/.claude/skills/
+```
+
+Then in any Claude Code session: type "add api key" (or `/add-secret`) → paste into the side panel → say "done". The skill also instructs Claude to warn you (and suggest rotation) if you ever paste a raw key into chat by accident.
+
+Under the hood it starts the UI with `CS_NO_BROWSER=1` (suppresses the external browser tab, since the form opens in-app instead) and shuts the server down with `cs ui-stop` when you're finished. `CS_NO_BROWSER=1` also works standalone with `cs add` if you ever want the server without a browser popup.
+
+Feel free to localize the skill: copy the folder, translate the `description:` trigger phrases (e.g. "api ekle", "clé api", "api キー追加") and the name, and Claude will trigger it in your language.
 
 ## How it works
 
